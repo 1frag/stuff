@@ -1,0 +1,39 @@
+import json
+import os
+from read_flow import WorkFlow
+from typing import List, Tuple
+
+
+def save_data(cursor):
+    m, _ = os.path.split(__file__)
+    meta = {}
+    with open(m + '/meta.json') as meta['file']:
+        meta['dict'] = json.load(meta['file'])
+    meta['dict']['CURSOR'] = cursor
+    with open('meta.json', 'w') as meta['file']:
+        json.dump(meta['dict'], meta['file'], indent=4, ensure_ascii=False)
+    del meta
+    print('\033[0m\nStopped.')
+
+
+def prepare_data() -> Tuple[str, List[str], str]:
+    """ meta.json should looks like:
+    {"SHEET_ID": "1234XX49aumSUVqYtG-5pThdQsT_test8R57INSUvDo0",
+     "CURSOR": ["your_list_name", "A", "5"]}
+    """
+    try:
+        m, _ = os.path.split(__file__)
+        meta = {}
+        with open(m + '/meta.json') as meta['file']:
+            meta['dict'] = json.load(meta['file'])
+            sheet_id = meta['dict']['SHEET_ID']
+            cursor = meta['dict']['CURSOR']  # [sheet_name, column, row]
+        del meta
+        return sheet_id, cursor, m + '/credentials.json'
+    except (FileNotFoundError, KeyError):
+        print('Meta data not provided')
+        exit(1)
+
+
+if __name__ == '__main__':
+    WorkFlow(*prepare_data(), save_data).run()
