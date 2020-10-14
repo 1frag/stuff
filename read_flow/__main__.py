@@ -4,13 +4,13 @@ from read_flow import WorkFlow
 from typing import List, Tuple
 
 
-def save_data(cursor):
+def save_data(cursor: List[str]):
     m, _ = os.path.split(__file__)
     meta = {}
     with open(m + '/meta.json') as meta['file']:
         meta['dict'] = json.load(meta['file'])
     meta['dict']['CURSOR'] = cursor
-    with open('meta.json', 'w') as meta['file']:
+    with open(m + '/meta.json', 'w') as meta['file']:
         json.dump(meta['dict'], meta['file'], indent=4, ensure_ascii=False)
     del meta
     print('\033[0m\nStopped.')
@@ -36,4 +36,5 @@ def prepare_data() -> Tuple[str, List[str], str]:
 
 
 if __name__ == '__main__':
-    WorkFlow(*prepare_data(), save_data).run()
+    sid, c, m = prepare_data()
+    WorkFlow(sid, c, m, save_data).run()

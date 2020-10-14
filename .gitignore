@@ -1,7 +1,7 @@
 /build/
 /dist/
 /foobar/
-/foobar.egg-info/
+*.egg-info*
 /setup_foobar.py
 .idea
 *__pycache__*
