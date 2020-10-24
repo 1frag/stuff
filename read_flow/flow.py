@@ -64,8 +64,6 @@ class WorkFlow:
         word = self.handle_clipboard()
         translation = list(self.info_on_word(word, False))[0]
         self.output.fill_props(None, translation)
-        # print('\t', translation, end='✓\n')
-        # self.no_end = False
 
     @hook.on('w')
     def write_result(self):
@@ -73,8 +71,6 @@ class WorkFlow:
         phonetic, translation = self.info_on_word(word)
         self.add_to_net(word, phonetic, translation)
         self.output.fill_props(phonetic, translation)
-        # print('', phonetic, translation, sep='\t', end='✓✓\n')
-        # self.no_end = False
 
     @hook.on('h')
     def help(self):
@@ -110,7 +106,6 @@ class WorkFlow:
         self.sheet = self.service.spreadsheets()
         self.cursor = cursor
         self.sheet_id = sheet_id
-        # self.no_end = False
         self.phonetic_reg = re.compile(r'class="transcribed_word">([^<]*)<')
         self.save_data = save_data
         self.disable = True
@@ -172,13 +167,6 @@ class WorkFlow:
         def callback(*_):
             nonlocal clip, uc
             self.output.new_word(clip.wait_for_text())
-            # if (v := clip.wait_for_text()) not in self.written:
-            #     p = '\033[0;3' + ((uc and '6') or '4') + 'm'
-            #     if self.no_end:
-            #         p = '\n' + p
-            #     print(p, v, sep='', end=' ', flush=True)
-            #     self.no_end = True
-            #     uc = 1 - uc
 
         clip.connect('owner-change', callback)
         try:
