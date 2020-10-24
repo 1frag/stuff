@@ -3,6 +3,8 @@ import keyboard
 import os
 import re
 import requests
+import rich.console
+import rich.table
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build  # NoQA
 from googletrans import Translator
@@ -60,22 +62,19 @@ class WorkFlow:
     @hook.on('t')
     def translate_only(self):
         word = self.handle_clipboard()
-        if word in self.written:
-            return
-        translation = self.get_translation(word)
-        print('\t', translation, end='✓\n')
-        self.no_end = False
+        translation = list(self.info_on_word(word, False))[0]
+        self.output.fill_props(None, translation)
+        # print('\t', translation, end='✓\n')
+        # self.no_end = False
 
     @hook.on('w')
     def write_result(self):
         word = self.handle_clipboard()
-        if word in self.written:
-            return
-        phonetic = '[' + (self.get_phonetic(word) or '') + ']'
-        translation = self.get_translation(word)
-        self.add(word, phonetic, translation)
-        print('', phonetic, translation, sep='\t', end='✓✓\n')
-        self.no_end = False
+        phonetic, translation = self.info_on_word(word)
+        self.add_to_net(word, phonetic, translation)
+        self.output.fill_props(phonetic, translation)
+        # print('', phonetic, translation, sep='\t', end='✓✓\n')
+        # self.no_end = False
 
     @hook.on('h')
     def help(self):
@@ -91,7 +90,8 @@ class WorkFlow:
             print('Enabled')
 
     @hook.on('r')
-    def _(self): pass
+    def _(self):
+        pass
 
     assert sorted(hook.triggers.keys()) == sorted(hotkeys.keys())
 
@@ -110,17 +110,20 @@ class WorkFlow:
         self.sheet = self.service.spreadsheets()
         self.cursor = cursor
         self.sheet_id = sheet_id
-        self.no_end = False
-        self.written = set()
+        # self.no_end = False
         self.phonetic_reg = re.compile(r'class="transcribed_word">([^<]*)<')
         self.save_data = save_data
         self.disable = True
+        self.output = Output([
+            ['Word', 'Transcription', 'Translation'],
+            ['acquire', '[əˈkwaɪə]', 'приобретать'],
+        ])  # todo: get previews
 
     def where(self):
         c = chr(ord(self.cursor[1]) + 2)
         return '{0}!{1}{2}:{3}{2}'.format(*self.cursor, c)
 
-    def add(self, *args):  # args == [word, phonetic, translation]
+    def add_to_net(self, *args):  # args == [word, phonetic, translation]
         result = (self.sheet.values()
                   .update(spreadsheetId=self.sheet_id,
                           range=self.where(),
@@ -138,16 +141,20 @@ class WorkFlow:
             txt = txt.replace('  ', ' ')
         return txt
 
-    def get_phonetic(self, word):
-        req = requests.post('https://tophonetics.com/',
-                            data={'text_to_transcribe': word})
-        phon = self.phonetic_reg.findall(req.content.decode())
-        return ' '.join(phon)
+    def info_on_word(
+            self,
+            word: str,
+            need_phonetic: bool = True,
+            need_translation: bool = True,
+    ):
+        if need_phonetic:
+            req = requests.post('https://tophonetics.com/',
+                                data={'text_to_transcribe': word})
+            phons = self.phonetic_reg.findall(req.content.decode())
+            yield '[' + ' '.join(phons or ['']) + ']'
 
-    @staticmethod
-    def get_translation(word):
-        translator = Translator()
-        return translator.translate(word, src='english', dest='russian').text
+        if need_translation:
+            yield Translator().translate(word, src='english', dest='russian').text
 
     def prepare_hook(self, keyboard_event):
         if not keyboard_event.event_type != 'down':
@@ -164,13 +171,14 @@ class WorkFlow:
 
         def callback(*_):
             nonlocal clip, uc
-            if (v := clip.wait_for_text()) not in self.written:
-                p = '\033[0;3' + ((uc and '6') or '4') + 'm'
-                if self.no_end:
-                    p = '\n' + p
-                print(p, v, sep='', end=' ', flush=True)
-                self.no_end = True
-                uc = 1 - uc
+            self.output.new_word(clip.wait_for_text())
+            # if (v := clip.wait_for_text()) not in self.written:
+            #     p = '\033[0;3' + ((uc and '6') or '4') + 'm'
+            #     if self.no_end:
+            #         p = '\n' + p
+            #     print(p, v, sep='', end=' ', flush=True)
+            #     self.no_end = True
+            #     uc = 1 - uc
 
         clip.connect('owner-change', callback)
         try:
@@ -178,3 +186,34 @@ class WorkFlow:
             rm_hook()
         except KeyboardInterrupt:
             self.save_data(self.cursor)
+
+
+class Output:
+    IncorrectUsage = type('IncorrectUsage', (Exception,), {})
+
+    def __init__(self, data: list[list]):
+        if len(data) == 0:
+            raise self.IncorrectUsage
+        self.data = data
+        self.console = rich.console.Console()
+
+    def new_word(self, word):
+        if len(self.data[-1]) != 1:
+            self.data.append([])
+        self.data[-1].append(word)
+        self.update()
+
+    def fill_props(self, phonetic, translation):
+        if len(self.data[-1]) != 1:
+            raise self.IncorrectUsage
+        self.data[-1].extend((phonetic, translation))
+        self.update()
+
+    def update(self):
+        table = rich.table.Table()
+        for title in self.data[0]:
+            table.add_column(title, style="dim", width=12)
+        for row in self.data[1:]:
+            table.add_row(*row)
+        self.console.clear()
+        self.console.print(table)
