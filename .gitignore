@@ -6,4 +6,4 @@
 .idea
 *__pycache__*
 *meta.json
-*credentials.json
+*credentials*.json

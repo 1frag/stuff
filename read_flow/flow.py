@@ -1,107 +1,64 @@
+from google_auth_oauthlib.flow import InstalledAppFlow
+from googleapiclient.discovery import build  # NoQA
+from googletrans import Translator
+from typing import Callable
+import click
 import gi
+import google.oauth2.credentials
 import keyboard
 import os
 import re
 import requests
 import rich.console
+import rich.segment
 import rich.table
-from google_auth_oauthlib.flow import InstalledAppFlow
-from googleapiclient.discovery import build  # NoQA
-from googletrans import Translator
-from typing import List, Callable
+import threading
+
+from . import utils
+
+rich.table.Segment = type('Segment', (rich.segment.Segment,), {})
+rich.table.Segment.line = classmethod(lambda cls: cls('\n\r'))
 
 gi.require_version('Gtk', '3.0')
 from gi.repository import Gtk, Gdk  # NoQA
 
-CURSOR_TYPE = List[str]  # [word, phonetic, translation]
-
-
-class Hooker:
-    def __init__(self):
-        self.triggers = {}
-        self.do = self.triggers.get
-
-    def on(self, x):
-        def deco(func):
-            self.triggers[x] = func
-            return func
-
-        return deco
+CURSOR_TYPE = list[str]  # [word, phonetic, translation]
 
 
 class WorkFlow:
-    hotkeys = {
-        'c': 'print where is the [c]ursor now',
-        'n': 'go cursor to [n]ext item',
-        'p': 'go cursor to [p]review item',
-        'r': '[r]esume handling',
-        's': '[s]top handling',
-        'u': 'print c[u]rrent state',
-        't': 'only print [t]ranslate',
-        'w': '[w]rite down word (phonetic + translate) at sheets and print them',
-        'h': 'print [h]elp',
-    }
-    hook = Hooker()
+    def goto(self, up=False, down=False):
+        assert up ^ down
+        self.cursor[-1] += 1 if (down or not up) else -1
+        self.output.update()
 
-    @hook.on('c')
-    def print_cursor(self):
-        print('\n', 'You are at', self.where())
+    def turn(self, on=False, off=False):
+        assert on ^ off
+        self.state['disable'] = (off or not on)
 
-    @hook.on('n')
-    def next_item(self):
-        self.cursor[-1] = str(int(self.cursor[-1]) + 1)
-
-    @hook.on('p')
-    def prev_item(self):
-        self.cursor[-1] = str(int(self.cursor[-1]) - 1)
-
-    @hook.on('s')
-    def stop(self):
-        self.disable = True
-
-    @hook.on('t')
-    def translate_only(self):
-        word = self.handle_clipboard()
+    def translate_only(self, word=None):
+        word = word or utils.paste()
         translation = list(self.info_on_word(word, False))[0]
         self.output.fill_props(None, translation)
 
-    @hook.on('w')
-    def write_result(self):
-        word = self.handle_clipboard()
+    def write_result(self, word=None):
+        word = word or utils.paste()
         phonetic, translation = self.info_on_word(word)
-        self.add_to_net(word, phonetic, translation)
+        self.update_on_net(word, phonetic, translation)
         self.output.fill_props(phonetic, translation)
-
-    @hook.on('h')
-    def help(self):
-        print('Help called:')
-        print('\n'.join(map(lambda x: '{0} - {1}'.format(*x),
-                            self.hotkeys.items())))
-
-    @hook.on('u')
-    def print_current_state(self):
-        if self.disable:
-            print('Disabled')
-        else:
-            print('Enabled')
-
-    @hook.on('r')
-    def _(self):
-        pass
-
-    assert sorted(hook.triggers.keys()) == sorted(hotkeys.keys())
 
     def __init__(
             self,
             sheet_id: str,
             cursor: CURSOR_TYPE,
-            path_to_cred: str,
+            path_to_creds: list[str],
             save_data: Callable[[CURSOR_TYPE], None]
     ):
         self.flow = InstalledAppFlow.from_client_secrets_file(
-            path_to_cred, ['https://www.googleapis.com/auth/spreadsheets']
+            path_to_creds[0], ['https://www.googleapis.com/auth/spreadsheets']
         )
-        self.creds = self.flow.run_local_server(port=0)
+        self.creds = google.oauth2.credentials.Credentials.from_authorized_user_file(
+            path_to_creds[1]
+        )
         self.service = build('sheets', 'v4', credentials=self.creds)
         self.sheet = self.service.spreadsheets()
         self.cursor = cursor
@@ -109,23 +66,32 @@ class WorkFlow:
         self.phonetic_reg = re.compile(r'class="transcribed_word">([^<]*)<')
         self.save_data = save_data
         self.disable = True
-        self.output = Output([
-            ['Word', 'Transcription', 'Translation'],
-            ['acquire', '[əˈkwaɪə]', 'приобретать'],
-        ])  # todo: get previews
+        self.state = {'disable': False}
+        self.output = Output(self.get_from_net(), self.cursor)
+        self.output.update()
 
-    def where(self):
+    def where(self, get=False, update=False):
+        assert get ^ update
         c = chr(ord(self.cursor[1]) + 2)
-        return '{0}!{1}{2}:{3}{2}'.format(*self.cursor, c)
+        pattern = '{0}!{1}{2}:{3}{2}'
+        if get or not update:
+            pattern = pattern.replace('{2}', '')
+        return pattern.format(*self.cursor, c)
 
-    def add_to_net(self, *args):  # args == [word, phonetic, translation]
+    def get_from_net(self):
+        return self.sheet.values().get(
+            spreadsheetId=self.sheet_id,
+            range=self.where(get=True)
+        ).execute()['values']
+
+    def update_on_net(self, *args):  # args == [word, phonetic, translation]
         result = (self.sheet.values()
                   .update(spreadsheetId=self.sheet_id,
-                          range=self.where(),
+                          range=self.where(update=True),
                           valueInputOption='RAW',
                           body={'values': [args]})
                   ).execute()
-        self.cursor[-1] = str(int(self.cursor[-1]) + 1)
+        self.cursor[-1] += 1
         return result
 
     @staticmethod
@@ -151,49 +117,86 @@ class WorkFlow:
         if need_translation:
             yield Translator().translate(word, src='english', dest='russian').text
 
-    def prepare_hook(self, keyboard_event):
-        if not keyboard_event.event_type != 'down':
-            return
-        if self.disable and keyboard_event.name == 'r':
-            self.disable = bool(input('Confirm here: ') == 'no')
-        if not self.disable:
-            if func := self.hook.do(keyboard_event.name):
-                func(self)
-
     def run(self):
-        clip, uc = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD), 1
-        rm_hook = keyboard.hook(self.prepare_hook)
-
-        def callback(*_):
-            nonlocal clip, uc
-            self.output.new_word(clip.wait_for_text())
-
-        clip.connect('owner-change', callback)
         try:
-            Gtk.main()
-            rm_hook()
+            WriteOnCopy(self.output, self.state).start()
+            WriteOnHook({
+                't': self.translate_only,
+                'w': self.write_result,
+            }, self.state).start()
+            listen({
+                'start': lambda: self.turn(on=True),
+                'stop': lambda: self.turn(off=True),
+            }, self.goto)
         except KeyboardInterrupt:
             self.save_data(self.cursor)
+
+
+def listen(key_to_act, goto):
+    while (c := click.getchar()) or True:
+        if c in ['\x1b', '/']:  # esc or /
+            # move cursor to last line, input
+            cmd = input('\033[' + os.popen('tput lines').read() + ';0H')
+            key_to_act.get(cmd, lambda: None)()
+        if c == '\x1b[A':  # up
+            goto(up=True)
+        if c == '\x1b[B':  # down
+            goto(down=True)
+        if c == 'q':
+            return
+
+
+class WriteOnCopy(threading.Thread):
+    def __init__(self, output: 'Output', state: dict):
+        super().__init__(target=self.target, daemon=True)
+        self.clip = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+        self.output = output
+        self.state = state
+
+    def target(self):
+        self.clip.connect('owner-change', self.callback)
+        Gtk.main()
+
+    def callback(self, *_):
+        if self.state['disable']:
+            return
+        self.output.new_word(self.clip.wait_for_text())
+
+
+class WriteOnHook:
+    def __init__(self, key_to_act: dict, state: dict):
+        self.key_to_act = key_to_act
+        self.state = state
+
+    def start(self):
+        keyboard.on_release(self.hook)
+
+    def hook(self, evt):
+        if self.state['disable']:
+            return
+        self.key_to_act.get(evt.name, lambda: None)()
 
 
 class Output:
     IncorrectUsage = type('IncorrectUsage', (Exception,), {})
 
-    def __init__(self, data: list[list]):
+    def __init__(self, data: list[list], cursor: CURSOR_TYPE):
         if len(data) == 0:
-            raise self.IncorrectUsage
+            raise self.IncorrectUsage()
         self.data = data
         self.console = rich.console.Console()
+        self.cursor = cursor
 
     def new_word(self, word):
-        if len(self.data[-1]) != 1:
-            self.data.append([])
+        if len(self.data[-1]) == 1:
+            self.data[-1:] = []
+        self.data.append([])
         self.data[-1].append(word)
         self.update()
 
     def fill_props(self, phonetic, translation):
         if len(self.data[-1]) != 1:
-            raise self.IncorrectUsage
+            raise self.IncorrectUsage()
         self.data[-1].extend((phonetic, translation))
         self.update()
 
@@ -201,7 +204,8 @@ class Output:
         table = rich.table.Table()
         for title in self.data[0]:
             table.add_column(title, style="dim", width=12)
-        for row in self.data[1:]:
-            table.add_row(*row)
+        for row_id in range(1, len(self.data)):
+            style = 'blue bold' if row_id == self.cursor[-1] else None
+            table.add_row(*self.data[row_id], style=style)
         self.console.clear()
-        self.console.print(table)
+        self.console.print(table, end='xx\r\n')
