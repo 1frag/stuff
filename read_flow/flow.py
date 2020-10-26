@@ -38,13 +38,19 @@ class WorkFlow:
     def translate_only(self, word=None):
         word = word or utils.paste()
         translation = list(self.info_on_word(word, False))[0]
-        self.output.fill_props(None, translation)
+        try:
+            self.output.fill_props(None, translation)
+        except Output.IncorrectUsage:
+            print('Attempt to fill props failed')
 
     def write_result(self, word=None):
         word = word or utils.paste()
         phonetic, translation = self.info_on_word(word)
         self.update_on_net(word, phonetic, translation)
-        self.output.fill_props(phonetic, translation)
+        try:
+            self.output.fill_props(phonetic, translation)
+        except Output.IncorrectUsage:
+            print('Attempt to fill props failed')
 
     def __init__(
             self,
@@ -53,6 +59,7 @@ class WorkFlow:
             path_to_creds: list[str],
             save_data: Callable[[CURSOR_TYPE], None]
     ):
+        self.log_file = open('log.txt', 'w')
         self.flow = InstalledAppFlow.from_client_secrets_file(
             path_to_creds[0], ['https://www.googleapis.com/auth/spreadsheets']
         )
@@ -67,6 +74,11 @@ class WorkFlow:
         self.save_data = save_data
         self.disable = True
         self.state = {'disable': False}
+        self.output = None
+        self.reload_from_net()
+
+    def reload_from_net(self):
+        print('reloading...')
         self.output = Output(self.get_from_net(), self.cursor)
         self.output.update()
 
@@ -94,13 +106,25 @@ class WorkFlow:
         self.cursor[-1] += 1
         return result
 
-    @staticmethod
-    def handle_clipboard():
-        txt = os.popen('xsel -b').read()
-        txt = txt.replace('-\n', '').replace('\n', ' ')
-        while '  ' in txt:
-            txt = txt.replace('  ', ' ')
-        return txt
+    def fill_empty_on_net(self):
+        print('fill empty cmd...')
+        data: list[list[str]] = self.get_from_net()
+        import json
+        self.log_file.write(json.dumps(data, indent=4, ensure_ascii=False))
+
+        for row in data:
+            if len(row) == 1:
+                row.extend(self.info_on_word(row[0]))
+                self.log_file.write(f'updating {row[0]}\n')
+            if len(row) and not (row[1].startswith('[') and row[1].endswith(']')):
+                row[1] = f'[{row[1]}]'
+        self.sheet.values() \
+            .update(spreadsheetId=self.sheet_id,
+                    range=self.where(get=True),
+                    valueInputOption='RAW',
+                    body={'values': data}) \
+            .execute()
+        self.reload_from_net()
 
     def info_on_word(
             self,
@@ -115,64 +139,80 @@ class WorkFlow:
             yield '[' + ' '.join(phons or ['']) + ']'
 
         if need_translation:
-            yield Translator().translate(word, src='english', dest='russian').text
+            try:
+                yield Translator().translate(
+                    word, src='english', dest='russian'
+                ).text
+            except AttributeError:
+                import traceback
+                self.log_file.write(traceback.format_exc())
+                yield ''
 
     def run(self):
         try:
-            WriteOnCopy(self.output, self.state).start()
+            WriteOnCopy(self).start()
             WriteOnHook({
                 't': self.translate_only,
                 'w': self.write_result,
-            }, self.state).start()
+            }, self).start()
             listen({
                 'start': lambda: self.turn(on=True),
                 'stop': lambda: self.turn(off=True),
-            }, self.goto)
+                'fill_empty': self.fill_empty_on_net,
+                'reload': self.reload_from_net,
+                'last_one': lambda: print(self.output.data[-1][0]),
+            }, self)
         except KeyboardInterrupt:
             self.save_data(self.cursor)
 
 
-def listen(key_to_act, goto):
+def listen(key_to_act, parent: 'WorkFlow'):
+    def not_found_cmd():
+        nonlocal cmd
+        print(f'`{cmd}` is not a command\r\nAvailable commands: ' +
+              ', '.join(key_to_act) + '\r\n')
+
     while (c := click.getchar()) or True:
         if c in ['\x1b', '/']:  # esc or /
             # move cursor to last line, input
-            cmd = input('\033[' + os.popen('tput lines').read() + ';0H')
-            key_to_act.get(cmd, lambda: None)()
+            parent.turn(off=True)
+            cmd = input('\033[' + os.popen('tput lines').read() + ';0H$ ')
+            parent.turn(on=True)
+            key_to_act.get(cmd, not_found_cmd)()
         if c == '\x1b[A':  # up
-            goto(up=True)
+            parent.goto(up=True)
         if c == '\x1b[B':  # down
-            goto(down=True)
+            parent.goto(down=True)
         if c == 'q':
             return
 
 
 class WriteOnCopy(threading.Thread):
-    def __init__(self, output: 'Output', state: dict):
+    def __init__(self, parent: 'WorkFlow'):
         super().__init__(target=self.target, daemon=True)
         self.clip = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
-        self.output = output
-        self.state = state
+        self.parent = parent
 
     def target(self):
         self.clip.connect('owner-change', self.callback)
         Gtk.main()
 
     def callback(self, *_):
-        if self.state['disable']:
+        if self.parent.state['disable']:
             return
-        self.output.new_word(self.clip.wait_for_text())
+        self.parent.output.new_word(self.clip.wait_for_text())
 
 
 class WriteOnHook:
-    def __init__(self, key_to_act: dict, state: dict):
+    def __init__(self, key_to_act: dict, parent: 'WorkFlow'):
         self.key_to_act = key_to_act
-        self.state = state
+        self.parent = parent
 
     def start(self):
         keyboard.on_release(self.hook)
 
     def hook(self, evt):
-        if self.state['disable']:
+        if self.parent.state['disable']:
             return
         self.key_to_act.get(evt.name, lambda: None)()
 
@@ -180,7 +220,7 @@ class WriteOnHook:
 class Output:
     IncorrectUsage = type('IncorrectUsage', (Exception,), {})
 
-    def __init__(self, data: list[list], cursor: CURSOR_TYPE):
+    def __init__(self, data: list[list[str]], cursor: CURSOR_TYPE):
         if len(data) == 0:
             raise self.IncorrectUsage()
         self.data = data
@@ -196,16 +236,24 @@ class Output:
 
     def fill_props(self, phonetic, translation):
         if len(self.data[-1]) != 1:
+            print(self.data[-3:], sep='\r\n', end='\r\n')
             raise self.IncorrectUsage()
         self.data[-1].extend((phonetic, translation))
         self.update()
 
     def update(self):
-        table = rich.table.Table()
+        table = rich.table.Table(show_lines=True)
         for title in self.data[0]:
-            table.add_column(title, style="dim", width=12)
+            table.add_column(title, style="dim", overflow='fold', width=12)
         for row_id in range(1, len(self.data)):
             style = 'blue bold' if row_id == self.cursor[-1] else None
-            table.add_row(*self.data[row_id], style=style)
+            table.add_row(*self._render_row(row_id), style=style)
         self.console.clear()
-        self.console.print(table, end='xx\r\n')
+        self.console.print(table, markup=False)
+
+    def _render_row(self, row_id):
+        if len(row := self.data[row_id]) != 3:
+            return row
+        if row[1] and row[1].startswith('['):
+            row[1] = '\\' + row[1]
+        return row
