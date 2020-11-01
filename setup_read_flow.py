@@ -6,7 +6,7 @@ with open('requirements/read_flow.txt') as r:
 
 setup(
     name='read_flow',
-    version='0.0.3pre',
+    version='0.0.3a2',
     install_requires=req.split('\n'),
     data_files=[('read_flow', glob.glob('read_flow/*.json'))],
     packages=find_packages(),

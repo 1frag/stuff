@@ -1,8 +1,10 @@
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build  # NoQA
 from googletrans import Translator
-from typing import Callable
+from typing import Callable, Literal, Optional
 import click
+import dataclasses
+import json
 import gi
 import google.oauth2.credentials
 import keyboard
@@ -22,18 +24,28 @@ rich.table.Segment.line = classmethod(lambda cls: cls('\n\r'))
 gi.require_version('Gtk', '3.0')
 from gi.repository import Gtk, Gdk  # NoQA
 
-CURSOR_TYPE = list[str]  # [word, phonetic, translation]
+
+@dataclasses.dataclass
+class Cursor:
+    sheet_name: str
+    column: str
+    row: int
+
+    def where(self, op: Literal['get', 'update']):
+        c = chr(ord(self.column) + 2)
+        pattern = '{0}!{1}{2}:{3}{2}'
+        if op == 'get':
+            pattern = pattern.replace('{2}', '')
+        return pattern.format(*dataclasses.astuple(self), c)
 
 
 class WorkFlow:
-    def goto(self, up=False, down=False):
-        assert up ^ down
-        self.cursor[-1] += 1 if (down or not up) else -1
+    def goto(self, op: Literal['up', 'down']):
+        self.cursor.row += 1 if (op == 'down') else -1
         self.output.update()
 
-    def turn(self, on=False, off=False):
-        assert on ^ off
-        self.state['disable'] = (off or not on)
+    def turn(self, op: Literal['on', 'off']):
+        self.state['disable'] = (op == 'off')
 
     def translate_only(self, word=None):
         word = word or utils.paste()
@@ -55,9 +67,9 @@ class WorkFlow:
     def __init__(
             self,
             sheet_id: str,
-            cursor: CURSOR_TYPE,
+            cursor: Cursor,
             path_to_creds: list[str],
-            save_data: Callable[[CURSOR_TYPE], None]
+            save_data: Callable[[Cursor], None]
     ):
         self.log_file = open('log.txt', 'w')
         self.flow = InstalledAppFlow.from_client_secrets_file(
@@ -74,42 +86,33 @@ class WorkFlow:
         self.save_data = save_data
         self.disable = True
         self.state = {'disable': False}
-        self.output = None
+        self.output: Optional[Output] = None
         self.reload_from_net()
 
     def reload_from_net(self):
-        print('reloading...')
+        print(os.popen('clear').read(), 'reloading...', sep='')
         self.output = Output(self.get_from_net(), self.cursor)
         self.output.update()
-
-    def where(self, get=False, update=False):
-        assert get ^ update
-        c = chr(ord(self.cursor[1]) + 2)
-        pattern = '{0}!{1}{2}:{3}{2}'
-        if get or not update:
-            pattern = pattern.replace('{2}', '')
-        return pattern.format(*self.cursor, c)
 
     def get_from_net(self):
         return self.sheet.values().get(
             spreadsheetId=self.sheet_id,
-            range=self.where(get=True)
+            range=self.cursor.where('get')
         ).execute()['values']
 
     def update_on_net(self, *args):  # args == [word, phonetic, translation]
         result = (self.sheet.values()
                   .update(spreadsheetId=self.sheet_id,
-                          range=self.where(update=True),
+                          range=self.cursor.where('update'),
                           valueInputOption='RAW',
                           body={'values': [args]})
                   ).execute()
-        self.cursor[-1] += 1
+        self.cursor.row += 1
         return result
 
     def fill_empty_on_net(self):
         print('fill empty cmd...')
         data: list[list[str]] = self.get_from_net()
-        import json
         self.log_file.write(json.dumps(data, indent=4, ensure_ascii=False))
 
         for row in data:
@@ -120,7 +123,7 @@ class WorkFlow:
                 row[1] = f'[{row[1]}]'
         self.sheet.values() \
             .update(spreadsheetId=self.sheet_id,
-                    range=self.where(get=True),
+                    range=self.cursor.where('get'),
                     valueInputOption='RAW',
                     body={'values': data}) \
             .execute()
@@ -156,8 +159,8 @@ class WorkFlow:
                 'w': self.write_result,
             }, self).start()
             listen({
-                'start': lambda: self.turn(on=True),
-                'stop': lambda: self.turn(off=True),
+                'start': lambda: self.turn('on'),
+                'stop': lambda: self.turn('off'),
                 'fill_empty': self.fill_empty_on_net,
                 'reload': self.reload_from_net,
                 'last_one': lambda: print(self.output.data[-1][0]),
@@ -167,24 +170,28 @@ class WorkFlow:
 
 
 def listen(key_to_act, parent: 'WorkFlow'):
-    def not_found_cmd():
+    set_at_cmd_reg = re.compile(r'set_at (\d+)')
+
+    def complex_cmd():
         nonlocal cmd
+        if match := set_at_cmd_reg.match(cmd):
+            parent.cursor.row = match.group(1)
+            parent.output.update()
+            return
         print(f'`{cmd}` is not a command\r\nAvailable commands: ' +
               ', '.join(key_to_act) + '\r\n')
 
     while (c := click.getchar()) or True:
         if c in ['\x1b', '/']:  # esc or /
             # move cursor to last line, input
-            parent.turn(off=True)
+            parent.turn('off')
             cmd = input('\033[' + os.popen('tput lines').read() + ';0H$ ')
-            parent.turn(on=True)
-            key_to_act.get(cmd, not_found_cmd)()
+            parent.turn('on')
+            key_to_act.get(cmd, complex_cmd)()
         if c == '\x1b[A':  # up
-            parent.goto(up=True)
+            parent.goto('up')
         if c == '\x1b[B':  # down
-            parent.goto(down=True)
-        if c == 'q':
-            return
+            parent.goto('down')
 
 
 class WriteOnCopy(threading.Thread):
@@ -200,7 +207,7 @@ class WriteOnCopy(threading.Thread):
     def callback(self, *_):
         if self.parent.state['disable']:
             return
-        self.parent.output.new_word(self.clip.wait_for_text())
+        self.parent.output.new_word(utils.paste())
 
 
 class WriteOnHook:
@@ -220,7 +227,7 @@ class WriteOnHook:
 class Output:
     IncorrectUsage = type('IncorrectUsage', (Exception,), {})
 
-    def __init__(self, data: list[list[str]], cursor: CURSOR_TYPE):
+    def __init__(self, data: list[list[str]], cursor: Cursor):
         if len(data) == 0:
             raise self.IncorrectUsage()
         self.data = data
@@ -246,7 +253,7 @@ class Output:
         for title in self.data[0]:
             table.add_column(title, style="dim", overflow='fold', width=12)
         for row_id in range(1, len(self.data)):
-            style = 'blue bold' if row_id == self.cursor[-1] else None
+            style = 'blue bold' if row_id == self.cursor.row else None
             table.add_row(*self._render_row(row_id), style=style)
         self.console.clear()
         self.console.print(table, markup=False)
