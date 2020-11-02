@@ -4,9 +4,9 @@ from googletrans import Translator
 from typing import Callable, Literal, Optional
 import click
 import dataclasses
-import json
 import gi
 import google.oauth2.credentials
+import json
 import keyboard
 import os
 import re
@@ -15,6 +15,7 @@ import rich.console
 import rich.segment
 import rich.table
 import threading
+import traceback
 
 from . import utils
 
@@ -86,6 +87,7 @@ class WorkFlow:
         self.save_data = save_data
         self.disable = True
         self.state = {'disable': False}
+        self.window = None
         self.output: Optional[Output] = None
         self.reload_from_net()
 
@@ -129,6 +131,12 @@ class WorkFlow:
             .execute()
         self.reload_from_net()
 
+    def set_workspace(self):
+        for i in range(5, 0, -1):
+            os.popen(f'echo {i} && sleep 1').read()
+        self.window = utils.current_window()
+        print('[+] Done')
+
     def info_on_word(
             self,
             word: str,
@@ -147,7 +155,6 @@ class WorkFlow:
                     word, src='english', dest='russian'
                 ).text
             except AttributeError:
-                import traceback
                 self.log_file.write(traceback.format_exc())
                 yield ''
 
@@ -164,6 +171,7 @@ class WorkFlow:
                 'fill_empty': self.fill_empty_on_net,
                 'reload': self.reload_from_net,
                 'last_one': lambda: print(self.output.data[-1][0]),
+                'set_workspace': self.set_workspace,
             }, self)
         except KeyboardInterrupt:
             self.save_data(self.cursor)
@@ -183,9 +191,8 @@ def listen(key_to_act, parent: 'WorkFlow'):
 
     while (c := click.getchar()) or True:
         if c in ['\x1b', '/']:  # esc or /
-            # move cursor to last line, input
             parent.turn('off')
-            cmd = input('\033[' + os.popen('tput lines').read() + ';0H$ ')
+            cmd = utils.read_cmd()
             parent.turn('on')
             key_to_act.get(cmd, complex_cmd)()
         if c == '\x1b[A':  # up
@@ -221,6 +228,9 @@ class WriteOnHook:
     def hook(self, evt):
         if self.parent.state['disable']:
             return
+        if self.parent.window is not None:
+            if utils.current_window() != self.parent.window:
+                return
         self.key_to_act.get(evt.name, lambda: None)()
 
 
