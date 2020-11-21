@@ -1,5 +1,5 @@
 from google_auth_oauthlib.flow import InstalledAppFlow
-from googleapiclient.discovery import build  # NoQA
+from googleapiclient.discovery import build
 from googletrans import Translator
 from typing import Callable, Literal, Optional
 import click
@@ -15,7 +15,6 @@ import rich.console
 import rich.segment
 import rich.table
 import threading
-import traceback
 
 from . import utils
 
@@ -50,7 +49,7 @@ class WorkFlow:
 
     def translate_only(self, word=None):
         word = word or utils.paste()
-        translation = list(self.info_on_word(word, False))[0]
+        translation = Informator(word).translation().get_one()
         try:
             self.output.fill_props(None, translation)
         except Output.IncorrectUsage:
@@ -58,7 +57,7 @@ class WorkFlow:
 
     def write_result(self, word=None):
         word = word or utils.paste()
-        phonetic, translation = self.info_on_word(word)
+        phonetic, translation = Informator(word).phonetic().translation().get_all()
         self.update_on_net(word, phonetic, translation)
         try:
             self.output.fill_props(phonetic, translation)
@@ -83,7 +82,6 @@ class WorkFlow:
         self.sheet = self.service.spreadsheets()
         self.cursor = cursor
         self.sheet_id = sheet_id
-        self.phonetic_reg = re.compile(r'class="transcribed_word">([^<]*)<')
         self.save_data = save_data
         self.disable = True
         self.state = {'disable': False}
@@ -119,7 +117,7 @@ class WorkFlow:
 
         for row in data:
             if len(row) == 1:
-                row.extend(self.info_on_word(row[0]))
+                row.extend(Informator(row[0]).phonetic().translation().get_all())
                 self.log_file.write(f'updating {row[0]}\n')
             if len(row) and not (row[1].startswith('[') and row[1].endswith(']')):
                 row[1] = f'[{row[1]}]'
@@ -136,27 +134,6 @@ class WorkFlow:
             os.popen(f'echo {i} && sleep 1').read()
         self.window = utils.current_window()
         print('[+] Done')
-
-    def info_on_word(
-            self,
-            word: str,
-            need_phonetic: bool = True,
-            need_translation: bool = True,
-    ):
-        if need_phonetic:
-            req = requests.post('https://tophonetics.com/',
-                                data={'text_to_transcribe': word})
-            phons = self.phonetic_reg.findall(req.content.decode())
-            yield '[' + ' '.join(phons or ['']) + ']'
-
-        if need_translation:
-            try:
-                yield Translator().translate(
-                    word, src='english', dest='russian'
-                ).text
-            except AttributeError:
-                self.log_file.write(traceback.format_exc())
-                yield ''
 
     def run(self):
         try:
@@ -177,6 +154,32 @@ class WorkFlow:
             self.save_data(self.cursor)
 
 
+class Informator:
+    phonetic_reg = re.compile(r'class="transcribed_word">([^<]*)<')
+
+    def __init__(self, word):
+        self.word = word
+        self._result = []
+        self.get_all = lambda: self._result
+        self.get_one = lambda: self._result[0]
+
+    def phonetic(self):
+        req = requests.post('https://tophonetics.com/', data={'text_to_transcribe': self.word})
+        phonetics = self.phonetic_reg.findall(req.content.decode())
+        self._result.append('[' + ' '.join(phonetics or ['']) + ']')
+        return self
+
+    def translation(self):
+        for _ in range(10):  # library sometimes raise exceptions, we have to repeat request
+            try:
+                self._result.append(Translator().translate(self.word, src='english', dest='russian').text)
+                return self
+            except (AttributeError, TypeError):
+                pass
+        self._result.append(None)
+        return self
+
+
 def listen(key_to_act, parent: 'WorkFlow'):
     set_at_cmd_reg = re.compile(r'set_at (\d+)')
 
@@ -185,9 +188,8 @@ def listen(key_to_act, parent: 'WorkFlow'):
         if match := set_at_cmd_reg.match(cmd):
             parent.cursor.row = match.group(1)
             parent.output.update()
-            return
-        print(f'`{cmd}` is not a command\r\nAvailable commands: ' +
-              ', '.join(key_to_act) + '\r\n')
+        else:
+            print(f'`{cmd}` is not a command\r\nAvailable commands: ' + ', '.join(key_to_act) + '\r\n')
 
     while (c := click.getchar()) or True:
         if c in ['\x1b', '/']:  # esc or /
@@ -204,7 +206,7 @@ def listen(key_to_act, parent: 'WorkFlow'):
 class WriteOnCopy(threading.Thread):
     def __init__(self, parent: 'WorkFlow'):
         super().__init__(target=self.target, daemon=True)
-        self.clip = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+        self.clip = Gtk.Clipboard().get(Gdk.SELECTION_CLIPBOARD)
         self.parent = parent
 
     def target(self):
