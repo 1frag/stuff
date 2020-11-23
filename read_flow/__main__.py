@@ -1,11 +1,13 @@
 import json
 import os
+import sys
 import dataclasses
+import pathlib
 
-from .flow import WorkFlow, Cursor
+from .flow import WorkFlow, Cursor, GoogleSheet
 
 
-def save_data(cursor: Cursor):
+def save_cursor(cursor: Cursor):
     m, _ = os.path.split(__file__)
     meta = {}
     with open(m + '/meta.json') as meta['file']:
@@ -17,25 +19,34 @@ def save_data(cursor: Cursor):
     print('\033[0m\nStopped.')
 
 
-def prepare_data() -> tuple[str, Cursor, list[str]]:
+def get_cursor() -> Cursor:
     """ meta.json should looks like:
-    {"SHEET_ID": "1234XX49aumSUVqYtG-5pThdQsT_test8R57INSUvDo0",
-     "CURSOR": ["your_list_name", "A", 5]}
+    {"CURSOR": ["your_list_name", "A", 5]}
     """
     try:
-        m, _ = os.path.split(__file__)
         meta = {}
-        with open(m + '/meta.json') as meta['file']:
+        with open(pathlib.Path(__file__).parent / 'meta.json') as meta['file']:
             meta['dict'] = json.load(meta['file'])
-            sheet_id = meta['dict']['SHEET_ID']
             cursor = Cursor(*meta['dict']['CURSOR'])
         del meta
-        return sheet_id, cursor, [m + '/credentials.json', m + '/credentials2.json']
+        return cursor
     except (FileNotFoundError, KeyError):
         print('Meta data not provided')
         exit(1)
 
 
 if __name__ == '__main__':
-    sid, c, m = prepare_data()
-    WorkFlow(sid, c, m, save_data).run()
+    if len(sys.argv) == 4 and sys.argv[1] == 'sign':
+        GoogleSheet.generate_signed_files(sys.argv[2], sys.argv[3])
+        exit(0)
+    if len(sys.argv) == 4 and sys.argv[1] == 'learn':
+        f, t = map(int, sys.argv[2:])
+        a = GoogleSheet().get(f'A{f}:A{t}')
+        c = GoogleSheet().get(f'C{f}:C{t}')
+        assert len(a) == len(c)
+        with open('out.txt', 'w') as out:
+            for ai, ci in zip(a, c):
+                if len(ai) and len(ci):
+                    out.write(f'{ai[0]}\t{ci[0]}\n')
+        exit(0)
+    WorkFlow(get_cursor(), save_cursor).run()
