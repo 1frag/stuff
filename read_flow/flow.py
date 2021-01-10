@@ -1,6 +1,5 @@
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
-from googletrans import Translator
 from typing import Callable, Literal
 import click
 import dataclasses
@@ -38,6 +37,11 @@ class Cursor:
         if op == 'get':
             pattern = pattern.replace('{2}', '')
         return pattern.format(*dataclasses.astuple(self), c)
+
+    def where_row(self, row_id):
+        c = chr(ord(self.column) + 2)
+        pattern = '{0}!{1}{4}:{3}{4}'
+        return pattern.format(*dataclasses.astuple(self), c, row_id)
 
 
 class WorkFlow:
@@ -83,15 +87,18 @@ class WorkFlow:
         data: list[list[str]] = self.g_sheet.get(self.cursor.where('get'))
         Output().log_file.write(json.dumps(data, indent=4, ensure_ascii=False))
 
-        for row in data:
+        for row_id, row in enumerate(data[1:], start=2):
+            if len(row) == 1 and row[0].lower().startswith('set#'):
+                continue
             if len(row) == 1:
                 row.extend(Informator(row[0]).phonetic().translation().get_all())
                 Output().log_file.write(f'updating {row[0]}\n')
-            if len(row) and not (row[1].startswith('[') and row[1].endswith(']')):
+            elif len(row) and not (row[1].startswith('[') and row[1].endswith(']')):
                 row[1] = f'[{row[1]}]'
+            else:
+                continue
+            self.g_sheet.update(self.cursor.where_row(row_id), row)
 
-        self.g_sheet.update(self.cursor.where('get'), data)
-        self.cursor.row += 1
         self.reload_from_net()
 
     def reload_from_net(self):
@@ -184,20 +191,44 @@ class Informator:
         self.get_all = lambda: self._result
         self.get_one = lambda: self._result[0]
 
+        def one_of():
+            while True:
+                yield 'AD08yZk6u03cH9XOAAypvLB1B4E1:1610259694701'
+                yield 'AD08yZmn7yo658P9CS6zsu-tr1TY:1610263779581'
+                yield 'AD08yZlnhatitexdkhTBB6myW-F1:1610263957709'
+        self._get_token = one_of()
+
     def phonetic(self):
         req = requests.post('https://tophonetics.com/', data={'text_to_transcribe': self.word})
         phonetics = self.phonetic_reg.findall(req.content.decode())
         self._result.append('[' + ' '.join(phonetics or ['']) + ']')
         return self
 
+    @property
+    def _token(self):
+        return next(self._get_token)
+
     def translation(self):
-        for _ in range(10):  # library sometimes raise exceptions, we have to repeat request
-            try:
-                self._result.append(Translator().translate(self.word, src='english', dest='russian').text)
-                return self
-            except (AttributeError, TypeError):
-                pass
-        self._result.append(None)
+        option = [self.word, "en", "ru"]
+        option = json.dumps(option, separators=(',', ':'), allow_nan=False,)
+
+        url = 'https://translate.google.ru/_/TranslateWebserverUi/data/batchexecute'
+        data = '&'.join(map('='.join, {
+            'f.req': json.dumps(
+                [[['AVdN8', option, None, 'generic']]],
+                separators=(',', ':'), allow_nan=False,
+            ),
+            'at': self._token,
+        }.items()))
+        r = requests.post(url, data=data, headers={'Content-Type': 'application/x-www-form-urlencoded'})
+        try:
+            result = json.loads(json.loads(r.text[5:])[0][2])[0][0][1]
+        except IndexError as e:
+            Output.log_file.write(' '.join(map(str, [
+                '\nIndexError:', e, '\nstatus:', r.status_code, '\ntext:', json.loads(r.text[5:]), '\n',
+            ])))
+            result = None
+        self._result.append(result)
         return self
 
 
